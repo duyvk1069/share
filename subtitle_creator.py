@@ -321,7 +321,7 @@ def generate_tts_segments(srt_path, output_dir="tts_audio_segments_raw", lang='v
                 if duration_sec <= 0: tqdm.write(f"\n[WARNING] Bỏ qua segment thời lượng <= 0: {time_line}"); continue
                 current_text = " ".join(lines[2:]).strip(); current_text = re.sub(r'<[^>]+>', '', current_text)
                 if not current_text or current_text.startswith('[') or len(current_text.strip()) < 2: continue
-                segment_index = len(tts_segments_info) + failed_tts_count + 1 # Tính index dựa trên số đã xử lý
+                segment_index = len(tts_segments_info) + failed_tts_count + 1
                 segment_filename = f"segment_{segment_index:04d}.mp3"; segment_path = os.path.join(output_dir, segment_filename)
                 try:
                     tts = gTTS(text=current_text, lang=lang, slow=False); tts.save(segment_path)
@@ -373,29 +373,28 @@ def adjust_tts_segment_tempo(tts_segment_infos, output_dir="tts_audio_segments_a
     print(f"[OK] Đã xử lý {len(tts_segment_infos)} TTS (Thành công: {valid_adjusted_count}) ({end_time - start_time:.2f} giây)")
     return adjusted_segments_info
 
-# <<< HÀM TẠO VIDEO VỚI THUYẾT MINH ĐỒNG BỘ (ITERATIVE MIXING - SỬA LỖI SAMPLE EXACTNESS) >>>
+# <<< HÀM TẠO VIDEO VỚI THUYẾT MINH ĐỒNG BỘ (ITERATIVE MIXING - SỬA LẠI ADELAY SYNTAX) >>>
 def create_synced_narration_video(video_in_path, background_audio_path, adjusted_segment_infos, video_out_path):
     """
     Tạo video với thuyết minh đồng bộ bằng cách trộn lặp lại từng đoạn TTS,
-    đồng bộ hóa tham số audio và sử dụng adelay với all_pts=1.
+    đồng bộ hóa tham số audio và sử dụng cú pháp adelay cũ với all_pts=1.
     """
-    print(f"\n[8] Đồng bộ hóa và TRỘN thuyết minh (iterative mixing v2): {video_out_path}...")
+    print(f"\n[8] Đồng bộ hóa và TRỘN thuyết minh (iterative mixing v3): {video_out_path}...")
     print("     (Bước này có thể mất nhiều thời gian và tạo nhiều file tạm)")
     start_time = time.time()
 
     # --- Đường dẫn file tạm ---
-    # Sử dụng .wav cho file tạm để tránh lỗi lossy compression
-    combined_tts_path = os.path.join(SCRIPT_DIR, "combined_tts_final_temp.wav")
+    combined_tts_path = os.path.join(SCRIPT_DIR, "combined_tts_final_temp.wav") # Sử dụng .wav
     temp_files_to_delete = []
 
-    # --- Kiểm tra file input (giữ nguyên) ---
-    if not os.path.exists(video_in_path): print(f"[ERROR] Không tìm thấy video đầu vào: {video_in_path}"); return False
-    if not background_audio_path or not os.path.exists(background_audio_path): print(f"[ERROR] Không tìm thấy file âm thanh nền: {background_audio_path}"); return False
-    if not adjusted_segment_infos: print("[ERROR] Không có thông tin segment TTS đã điều chỉnh để xử lý."); return False
+    # --- Kiểm tra file input ---
+    if not os.path.exists(video_in_path): print(f"[ERROR] Không tìm thấy video đầu vào."); return False
+    if not background_audio_path or not os.path.exists(background_audio_path): print(f"[ERROR] Không tìm thấy file âm thanh nền."); return False
+    if not adjusted_segment_infos: print("[ERROR] Không có TTS đã điều chỉnh."); return False
 
     os.makedirs(os.path.dirname(video_out_path), exist_ok=True)
 
-    # --- Lấy thời lượng video (giữ nguyên) ---
+    # --- Lấy thời lượng video ---
     video_duration = None
     try:
         ffprobe_executable = os.path.join(os.path.dirname(get_ffmpeg_path()), "ffprobe")
@@ -403,29 +402,26 @@ def create_synced_narration_video(video_in_path, background_audio_path, adjusted
         ffprobe_cmd = [ffprobe_executable, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_in_path]
         duration_str = subprocess.check_output(ffprobe_cmd).strip().decode('utf-8')
         video_duration = float(duration_str)
-        print(f"   Thời lượng video gốc: {video_duration:.3f} giây") # Thêm độ chính xác
-    except Exception as e:
-        print(f"[ERROR] Không lấy được thời lượng video gốc: {e}. Dừng.")
-        cleanup_temp_files(temp_files_to_delete + [combined_tts_path])
-        return False
+        print(f"   Thời lượng video gốc: {video_duration:.3f} giây")
+    except Exception as e: print(f"[ERROR] Không lấy được thời lượng video gốc: {e}."); cleanup_temp_files(temp_files_to_delete + [combined_tts_path]); return False
 
-    # --- Lọc ra các segment TTS hợp lệ (giữ nguyên) ---
+    # --- Lọc TTS hợp lệ ---
     valid_tts_segments = [info for info in adjusted_segment_infos if info.get('adjusted_audio_path') and os.path.exists(info['adjusted_audio_path']) and os.path.getsize(info['adjusted_audio_path']) > 50]
     if not valid_tts_segments:
-        # --- Xử lý khi không có TTS (giữ nguyên) ---
-        print("[INFO] Không có file TTS hợp lệ. Tạo video chỉ với âm thanh nền.")
-        # ... (code tạo video chỉ có nền giữ nguyên) ...
-        return True # Hoặc trả về kết quả của lệnh
+        print("[INFO] Không có TTS hợp lệ. Tạo video chỉ với nền.")
+        command_mix_only_bg = [get_ffmpeg_path(), "-y", "-i", video_in_path, "-i", background_audio_path, "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", video_out_path]
+        try:
+             print(f"   Đang chạy ffmpeg (chỉ trộn nền)..."); result = subprocess.run(command_mix_only_bg, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+             if not os.path.exists(video_out_path) or os.path.getsize(video_out_path) < 100: print(f"[ERROR] Tạo video nền thất bại.\n{result.stderr}"); return False
+             print(f"[OK] Đã tạo video chỉ với nền: {video_out_path}"); return True
+        except Exception as e: print(f"[ERROR] Lỗi tạo video nền: {e}"); return False
 
     # --- Bước 8a (Iterative): Tạo file âm thanh im lặng ban đầu (.wav) ---
     print("   [8a] Tạo file âm thanh im lặng ban đầu (.wav)...")
-    # Sử dụng .wav cho file im lặng ban đầu
     silent_audio_path = os.path.join(SCRIPT_DIR, "iterative_mix_0.wav")
     temp_files_to_delete.append(silent_audio_path)
-    audio_channels_str = "2"; audio_samplerate_str = "44100"
-    target_ch_layout = "stereo"
+    audio_channels = 2; audio_channels_str = "2"; audio_samplerate_str = "44100"; target_ch_layout = "stereo"
     try:
-        # Lấy thông tin audio nền
         ffprobe_executable = os.path.join(os.path.dirname(get_ffmpeg_path()), "ffprobe")
         if not os.path.exists(ffprobe_executable): ffprobe_executable = "ffprobe"
         ffprobe_cmd_audio = [ffprobe_executable, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels,sample_rate", "-of", "default=noprint_wrappers=1", background_audio_path]
@@ -434,7 +430,7 @@ def create_synced_narration_video(video_in_path, background_audio_path, adjusted
         for line in audio_info_output.splitlines():
              if '=' in line: key, value = line.split('=', 1); audio_info[key.strip()] = value.strip()
         if 'channels' in audio_info:
-            try: val = int(audio_info['channels']); audio_channels_str = str(val) if 1 <= val <= 8 else "2"
+            try: val = int(audio_info['channels']); audio_channels = val; audio_channels_str = str(val) if 1 <= val <= 8 else "2"
             except ValueError: pass
         if 'sample_rate' in audio_info:
             try: val = int(audio_info['sample_rate']); audio_samplerate_str = str(val) if 8000 <= val <= 192000 else "44100"
@@ -443,12 +439,9 @@ def create_synced_narration_video(video_in_path, background_audio_path, adjusted
         print(f"        Thông tin audio mục tiêu: Ch={audio_channels_str}, Rate={audio_samplerate_str}, Layout={target_ch_layout}")
     except Exception as e: print(f"[WARNING] Lỗi lấy thông tin audio nền: {e}")
 
-    # Tạo file silent .wav
     command_silent = [get_ffmpeg_path(), "-y", "-f", "lavfi",
                       "-i", f"anullsrc=channel_layout={target_ch_layout}:sample_rate={audio_samplerate_str}",
-                      "-t", str(video_duration),
-                      "-c:a", "pcm_s16le", # Codec lossless WAV
-                      silent_audio_path]
+                      "-t", str(video_duration), "-c:a", "pcm_s16le", silent_audio_path]
     try:
         print(f"        Đang chạy lệnh tạo silent .wav: {' '.join(command_silent[:7])} ...")
         result_silent = subprocess.run(command_silent, check=True, capture_output=True, text=True, encoding='utf-8', errors='ignore')
@@ -460,35 +453,35 @@ def create_synced_narration_video(video_in_path, background_audio_path, adjusted
         cleanup_temp_files(temp_files_to_delete)
         return False
 
-    # --- Bước 8b (Iterative): Trộn lần lượt từng file TTS (Sử dụng adelay=all_pts=1, bỏ apad) ---
-    print("   [8b] Trộn lặp lại các file TTS (đồng bộ hóa, adelay all_pts=1)...")
+    # --- Bước 8b (Iterative): Trộn lần lượt từng file TTS (SỬA LẠI ADELAY SYNTAX) ---
+    print("   [8b] Trộn lặp lại các file TTS (đồng bộ hóa, adelay all=1)...")
     current_mix_file = silent_audio_path
 
     with tqdm(total=len(valid_tts_segments), desc="   Mixing TTS", unit="seg", ncols=100) as pbar:
         for i, info in enumerate(valid_tts_segments):
             tts_path = info['adjusted_audio_path']
             iteration = i + 1
-            # Sử dụng .wav cho file tạm
             next_mix_file = os.path.join(SCRIPT_DIR, f"iterative_mix_{iteration}.wav")
             temp_files_to_delete.append(next_mix_file)
 
             start_ms = int(info['start_sec'] * 1000)
 
-            # --- Filter complex: aformat, adelay(all_pts=1), amix ---
-            # Bỏ apad đi
+            # --- Filter complex: aformat, adelay (đúng cú pháp), amix ---
+            # Tạo chuỗi delay dạng "ms|ms|..." cho tất cả các kênh
+            delay_str_per_channel = "|".join([str(start_ms)] * audio_channels)
+
             filter_complex_string_iter = (
                 f"[1:a]aformat=sample_fmts=fltp:sample_rates={audio_samplerate_str}:channel_layouts={target_ch_layout}," # Đồng bộ TTS
-                f"adelay=delay={start_ms}:all=1[delayed_tts];" # Delay TTS (sử dụng all_pts=1)
+                f"adelay={delay_str_per_channel}:all=1[delayed_tts];" # Delay TTS (sử dụng cú pháp đúng với all=1)
                 f"[0:a][delayed_tts]amix=inputs=2:duration=first:dropout_transition=0[mixed]" # Trộn
             )
-            # Lưu ý: adelay=delay={start_ms}:all=1 là cách viết mới hơn, tương đương adelay={start_ms}|{start_ms}:all=1
 
             command_iterative_mix = [get_ffmpeg_path(), "-y",
                                      "-i", current_mix_file,
                                      "-i", tts_path,
                                      "-filter_complex", filter_complex_string_iter,
                                      "-map", "[mixed]",
-                                     "-c:a", "pcm_s16le", # Sử dụng codec lossless cho file tạm
+                                     "-c:a", "pcm_s16le", # Sử dụng codec lossless
                                      next_mix_file]
 
             try:
@@ -499,7 +492,6 @@ def create_synced_narration_video(video_in_path, background_audio_path, adjusted
                      cleanup_temp_files(temp_files_to_delete)
                      return False
 
-                # Xóa file mix .wav của bước *trước đó*
                 if i > 0 and current_mix_file in temp_files_to_delete:
                      try: os.remove(current_mix_file); temp_files_to_delete.remove(current_mix_file)
                      except Exception as e_del: tqdm.write(f"\n[WARNING] Không xóa được file mix tạm .wav {current_mix_file}: {e_del}")
@@ -535,17 +527,16 @@ def create_synced_narration_video(video_in_path, background_audio_path, adjusted
     # --- Bước 8c: Trộn video, âm thanh nền và TTS kết hợp (.wav) ---
     print("   [8c] Trộn video, nền và thuyết minh kết hợp (.wav)...")
     command_final_mix = [get_ffmpeg_path(), "-y",
-                         "-i", video_in_path,           # Input 0: video
-                         "-i", background_audio_path,   # Input 1: background
-                         "-i", combined_tts_path,       # Input 2: combined TTS (.wav)
-                         # Trộn nền và TTS kết hợp, mã hóa sang AAC
+                         "-i", video_in_path,
+                         "-i", background_audio_path,
+                         "-i", combined_tts_path,
                          "-filter_complex", f"[1:a]aformat=sample_fmts=fltp:sample_rates={audio_samplerate_str}:channel_layouts={target_ch_layout}[bg_sync];"
                                             f"[2:a]aformat=sample_fmts=fltp:sample_rates={audio_samplerate_str}:channel_layouts={target_ch_layout}[tts_sync];"
                                             f"[bg_sync][tts_sync]amix=inputs=2:duration=first:dropout_transition=0[a_final_mix]",
                          "-map", "0:v",
                          "-map", "[a_final_mix]",
                          "-c:v", "copy",
-                         "-c:a", "aac", "-b:a", "192k", # Mã hóa audio cuối cùng sang AAC
+                         "-c:a", "aac", "-b:a", "192k", # Mã hóa sang AAC
                          "-shortest",
                          video_out_path]
     try:
@@ -557,7 +548,7 @@ def create_synced_narration_video(video_in_path, background_audio_path, adjusted
             return False
         end_time = time.time()
         print(f"[OK] Đã tạo video thuyết minh: {video_out_path} (Thời gian bước 8: {end_time - start_time:.2f} giây)")
-        cleanup_temp_files([combined_tts_path, silent_audio_path]) # Xóa file .wav tạm cuối và file silent ban đầu
+        cleanup_temp_files([combined_tts_path, silent_audio_path]) # Xóa file .wav cuối và silent ban đầu
         return True
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Lỗi trộn video cuối cùng (code: {e.returncode}).")
@@ -633,7 +624,6 @@ def main():
                  valid_adjusted_count = sum(1 for info in tts_segments_info_adjusted if info.get('adjusted_audio_path'))
                  final_message.append(f"TTS điều chỉnh: {valid_adjusted_count} files")
                  if valid_adjusted_count > 0 and background_audio_file:
-                     # Gọi hàm iterative mixing đã sửa
                      narrated_synced_success = create_synced_narration_video(VIDEO_FILE, background_audio_file, tts_segments_info_adjusted, OUTPUT_VIDEO_FILE_NARRATED)
                      final_message.append(f"Video thuyết minh: {OUTPUT_VIDEO_FILE_NARRATED}" if narrated_synced_success else "[LỖI] Video thuyết minh")
                  elif not background_audio_file: final_message.append("[LỖI] Thiếu file nền.")
@@ -642,7 +632,7 @@ def main():
         else: final_message.append("[LỖI] Tạo TTS gốc")
     else: final_message.append("[INFO] Bỏ qua thuyết minh")
 
-    cleanup_temp_files(files_to_cleanup_main)
+    #cleanup_temp_files(files_to_cleanup_main)
     print("\n" + "="*30 + " KẾT QUẢ " + "="*30)
     print(f"Tổng thời gian: {time.time() - total_start_time:.2f} giây")
     print(f"Video gốc: {VIDEO_FILE}")
